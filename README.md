@@ -19,9 +19,37 @@ A real-time environmental monitoring dashboard for ESP32-based sensor setups. Tr
 
 ---
 
-## Screenshots
+## How It Works
 
-> _Connect your ESP32 and open `esp32-dashboard.html` in any modern browser._
+Open the file in your browser and you'll land straight on the live dashboard. No login, no install, no internet connection required — it runs entirely in the browser and talks directly to your ESP32 over your local network.
+
+When no device is connected, the dashboard runs in **demo mode** automatically, cycling through realistic sensor values so you can explore the interface before your hardware is ready. The moment you connect a real ESP32, live data takes over.
+
+---
+
+## What You'll See on the Page
+
+The dashboard is laid out in a dark green instrument-panel style, divided into several areas:
+
+**Header bar** — across the top. On the left is the Verdant logo. On the right you'll find the ESP32 IP address input, a Connect button, a live/disconnected status indicator, and the Feedback button.
+
+**O₂ card** (top-left) — a large animated ring gauge showing the current oxygen percentage. The ring glows green at normal levels, shifts to orange if elevated, and red if low. It pulses gently like a breath.
+
+**CO₂ card** (top-centre) — the current CO₂ reading in parts per million, with a colour-coded badge (Normal / Elevated / Danger) and a bar chart comparing the live reading against the normal baseline (400 ppm) and the danger threshold (5,000 ppm).
+
+**Soil Moisture card** (top-right) — a horizontal gauge bar showing moisture as a percentage, with a plain-language label: Dry, Adequate, or Saturated.
+
+**Light Level card** (second row, left) — same style gauge for ambient light in lux, auto-formatted to `k lx` for large values. Labels range from Dark through Indoor / Overcast to Full Sun.
+
+**Summary card** (second row, centre) — a quick at-a-glance list of all four current readings with a timestamp of the last successful update.
+
+**Config card** (second row, right) — lets you change the poll rate (2 s / 5 s / 10 s / 30 s) and the sensor endpoint path without editing any code.
+
+**Trend charts** (bottom, spanning three columns) — four sparkline graphs showing the last 30 readings for each sensor, with a glowing line and a live value label. Useful for spotting drift or sudden changes.
+
+**Camera panel** (right column, full height) — paste your ESP32-CAM stream URL and click Load to see the live video feed. You can take a snapshot (saved as a PNG) or go fullscreen. Below the feed is a scrolling event log showing connection activity, sensor reads, and any errors.
+
+**Feedback button** — click it any time to open the feedback modal. Rate your experience, pick topic tags, write a comment, and submit. An AI-generated reply appears before the form closes.
 
 ---
 
@@ -45,11 +73,21 @@ const char* password = "YOUR_PASSWORD";
 WebServer server(80);
 
 void handleSensors() {
-  // Replace these with your real sensor reads
-  float o2       = 20.9;
-  int   co2      = 412;
-  int   moisture = 45;
-  int   light    = 18500;
+  // DHT22 — requires DHT sensor library by Adafruit
+  float temperature = dht.readTemperature();   // °C
+  float humidity    = dht.readHumidity();      // % RH
+
+  // MQ-135 — analog read, convert to ppm using MQ135 library or calibration curve
+  int   airQuality  = mq135.getPPM();          // CO₂ ppm equivalent
+
+  // Capacitive Soil Moisture V2.0 — map raw ADC to 0–100% (calibrate for your soil)
+  int   moisture    = map(analogRead(MOISTURE_PIN), 4095, 1500, 0, 100);
+
+  // LDR — raw ADC value 0–1023 (higher = brighter with voltage divider)
+  int   light       = analogRead(LDR_PIN);
+
+  // Thermistor — convert via Steinhart-Hart equation
+  float tempTherm   = readThermistor();        // your conversion function
 
   String json = "{";
   json += "\"o2\":"       + String(o2, 1)  + ",";
@@ -88,19 +126,35 @@ Your ESP32 endpoint (default: `GET /sensors`) must return:
 
 ```json
 {
-  "o2":       20.9,
-  "co2":      412,
-  "moisture": 45,
-  "light":    18500
+  "o2":        20.94,
+  "co2":       412,
+  "tvoc":      0.142,
+  "eco2":      520,
+  "hcho":      0.031,
+  "dhtTemp":   23.4,
+  "dhtHum":    58.2,
+  "soil":      45,
+  "light":     620,
+  "pressure":  1013.2,
+  "bmpTemp":   23.1,
+  "ky28Temp":  22.9
 }
 ```
 
-| Field      | Unit       | Description                        |
-|------------|------------|------------------------------------|
-| `o2`       | % vol      | Oxygen concentration               |
-| `co2`      | ppm        | Carbon dioxide concentration       |
-| `moisture` | %          | Soil moisture (0 = dry, 100 = sat) |
-| `light`    | lux        | Ambient light level                |
+| Field | Unit | Sensor | Description |
+|-------|------|--------|-------------|
+| `o2` | % vol | SC4-O2 | Oxygen concentration |
+| `co2` | ppm | MH-Z1911A | True CO₂ (NDIR infrared) |
+| `tvoc` | mg/m³ | Y01 | Total VOC (0–2.000) |
+| `eco2` | ppm | Y01 | Equivalent CO₂ (350–2000) |
+| `hcho` | mg/m³ | Y01 | Formaldehyde (0–1.000) |
+| `dhtTemp` | °C | DHT22 | Air temperature (±0.5°C) |
+| `dhtHum` | % RH | DHT22 | Relative humidity (±2–5%) |
+| `soil` | % | Cap. Soil V2.0 | Soil moisture (0 = dry, 100 = saturated) |
+| `light` | 0–1023 raw | KY-018 LDR | Ambient light ADC value |
+| `pressure` | hPa | BMP085 | Barometric pressure |
+| `bmpTemp` | °C | BMP085 | Temperature (I²C) |
+| `ky28Temp` | °C | KY-028 | Temperature (analog GPIO 33) |
 
 ---
 
@@ -120,14 +174,19 @@ The camera panel streams MJPEG video directly from your ESP32-CAM module.
 
 ---
 
-## Recommended Sensors
+## Your Sensors
 
-| Sensor    | Measures  | Module          |
-|-----------|-----------|-----------------|
-| MH-Z19B   | CO₂       | UART / PWM      |
-| Grove SEN0193 | Soil moisture | Analog     |
-| BH1750    | Light (lux) | I²C           |
-| MQ-2 / custom | O₂   | Analog / I²C   |
+| Sensor | Measures | Interface |
+|--------|----------|-----------|
+| SC4-O2 | Oxygen % concentration | Analog / UART |
+| MH-Z1911A | True CO₂ (NDIR infrared) | UART (TX pin 2, RX pin 3) or PWM |
+| Y01 TVOC/Gas Module (YYS) | TVOC (0–2 mg/m³), eCO₂ (350–2000 ppm), HCHO (0–1 mg/m³) | UART 9600 8N1 (4-pin JST-XH) |
+| DHT22 (AM2302) | Temperature (±0.5°C) & humidity (±2–5% RH) | Digital single-wire (Adafruit DHT library) |
+| KY-018 Photoresistor | Ambient light (raw ADC 0–1023) | Analog (S pin = signal) |
+| Capacitive Soil Moisture V2.0 | Soil moisture % | Analog ADC → GPIO 34 |
+| BMP085 | Barometric pressure & temperature | I²C (SCL + SDA) |
+| KY-028 Digital Temperature | Temperature (analog voltage) | Analog → GPIO 33 |
+| ESP32-CAM AI Thinker | Live video feed | MJPEG HTTP stream (:81/stream) |
 
 ---
 
